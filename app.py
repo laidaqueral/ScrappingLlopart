@@ -38,15 +38,28 @@ with tab_dashboard:
         col1, col2 = st.columns([1, 4])
         with col1:
             if st.button("🔄 Actualitza preus ara", use_container_width=True):
+                fallits = []
                 with st.spinner("Consultant les webs..."):
                     for u in urls:
+                        if not u["selector_css"]:
+                            # URL configurada com a "només manual": no s'intenta scrapejar.
+                            continue
                         preu, error, nou_sel, nou_idx = obtenir_preu_amb_fallback(
                             u["url"], u["selector_css"], index=u["index_element"]
                         )
                         db.guardar_preu(u["id"], preu, error)
                         if nou_sel and (nou_sel != u["selector_css"] or nou_idx != u["index_element"]):
                             db.actualitzar_selector(u["id"], nou_sel, nou_idx)
-                st.success("Preus actualitzats!")
+                        if preu is None:
+                            fallits.append(u["botiga"])
+                if fallits:
+                    st.warning(
+                        "No s'ha pogut extreure el preu automàticament per: "
+                        + ", ".join(fallits)
+                        + ". Pots introduir-lo a mà a la pestanya 'URLs / Botigues'."
+                    )
+                else:
+                    st.success("Preus actualitzats!")
                 st.rerun()
 
         registres = db.historic_per_producte(producte_id)
@@ -55,10 +68,11 @@ with tab_dashboard:
             st.warning("Encara no hi ha cap preu registrat per aquest producte. Prem 'Actualitza preus ara'.")
         else:
             df = pd.DataFrame(
-                [(r["data_hora"], r["botiga"], r["preu"], r["error"]) for r in registres],
-                columns=["Data", "Botiga", "Preu", "Error"]
+                [(r["data_hora"], r["botiga"], r["preu"], r["error"],
+                  "Sí" if r["es_manual"] else "No") for r in registres],
+                columns=["Data", "Botiga", "Preu", "Error", "Manual"]
             )
-            df["Data"] = pd.to_datetime(df["Data"])
+            df["Data"] = pd.to_datetime(df["Data"], format="mixed")
 
             fig = px.line(
                 df.dropna(subset=["Preu"]),
@@ -66,20 +80,43 @@ with tab_dashboard:
                 title=f"Evolució de preu — {nom_sel}"
             )
             fig.update_layout(yaxis_title="Preu (€)", xaxis_title="Data")
+            fig.update_xaxes(
+                type="date",
+                dtick=86400000,  # un dia, en mil·lisegons: força que cada "tick" sigui un dia sencer
+                tickformat="%d-%m-%Y",
+            )
             st.plotly_chart(fig, use_container_width=True)
 
             st.subheader("Últim preu per botiga")
-            cols = st.columns(len(urls)) if urls else []
-            for c, u in zip(cols, urls):
-                ultim = db.ultim_preu(u["id"])
-                with c:
-                    if ultim and ultim["preu"] is not None:
-                        st.metric(u["botiga"], f"{ultim['preu']:.2f} €")
-                    else:
-                        st.metric(u["botiga"], "—")
+            BOTIGUES_PER_FILA = 5
+            for i in range(0, len(urls), BOTIGUES_PER_FILA):
+                fila = urls[i:i + BOTIGUES_PER_FILA]
+                cols = st.columns(BOTIGUES_PER_FILA)
+                for c, u in zip(cols, fila):
+                    ultim = db.ultim_preu(u["id"])
+                    with c:
+                        if ultim and ultim["preu"] is not None:
+                            etiqueta = u["botiga"] + (" ✏️" if ultim["es_manual"] else "")
+                            st.metric(etiqueta, f"{ultim['preu']:.2f} €")
+                            if ultim["es_manual"]:
+                                st.caption("✏️ Preu manual")
+                        else:
+                            st.metric(u["botiga"], "—")
 
             with st.expander("Veure dades en taula"):
-                st.dataframe(df, use_container_width=True)
+                df_taula = df.copy()
+                df_taula["Data"] = df_taula["Data"].dt.strftime("%d-%m-%Y")
+                df_taula = df_taula.sort_values("Data", ascending=False)
+
+                n_registres = len(df_taula)
+                n_mostrar = st.slider(
+                    "Quants registres recents vols veure",
+                    min_value=min(10, n_registres),
+                    max_value=n_registres,
+                    value=min(20, n_registres),
+                ) if n_registres > 10 else n_registres
+
+                st.dataframe(df_taula.head(n_mostrar), use_container_width=True)
 
 # ============================================================
 # TAB PRODUCTES
@@ -189,7 +226,8 @@ with tab_urls:
             st.info(
                 f"No s'ha trobat cap preu automàticament per «{botiga_p}». "
                 "Com a últim recurs, indica el selector CSS manualment "
-                "(clic dret sobre el preu a la web → Inspeccionar → Copy selector)."
+                "(clic dret sobre el preu a la web → Inspeccionar → Copy selector), "
+                "o bé introdueix el preu a mà."
             )
             selector_manual = st.text_input("Selector CSS manual", key="selector_manual")
             if st.button("Provar selector manual"):
@@ -204,35 +242,77 @@ with tab_urls:
                 else:
                     st.error(error2)
 
+            st.divider()
+            st.write("✏️ **O introdueix el preu manualment** (no es podrà actualitzar automàticament):")
+            preu_manual_nou = st.number_input(
+                "Preu (€)", min_value=0.0, step=0.01, format="%.2f", key="preu_manual_nou"
+            )
+            if st.button("✏️ Afegir amb preu manual"):
+                # selector_css buit = URL marcada com "només manual": l'app no
+                # intentarà extreure'l automàticament en les properes actualitzacions.
+                db.afegir_url(producte_id2, botiga_p, url_p, "", 0)
+                nova_url = db.llistar_urls(producte_id2)[-1]
+                db.guardar_preu_manual(nova_url["id"], preu_manual_nou)
+                st.success(f"Preu manual de {preu_manual_nou:.2f} € afegit per «{botiga_p}»")
+                del st.session_state["url_pendent"]
+                st.rerun()
+
         st.divider()
         st.subheader("URLs configurades")
         urls = db.llistar_urls(producte_id2)
         for u in urls:
-            c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
+            c1, c2, c3, c4, c5 = st.columns([3, 1, 1, 1, 1])
             ultim = db.ultim_preu(u["id"])
-            preu_text = f"{ultim['preu']:.2f} €" if ultim and ultim["preu"] is not None else "—"
-            c1.write(f"**{u['botiga']}** — {u['url']}  \nÚltim preu: {preu_text}")
+            if ultim and ultim["preu"] is not None:
+                marca_manual = " ✏️ (manual)" if ultim["es_manual"] else ""
+                preu_text = f"{ultim['preu']:.2f} €{marca_manual}"
+            else:
+                preu_text = "—"
+            nom_botiga_mostrat = u["botiga"] + (" 🛑 (sense scraping)" if not u["selector_css"] else "")
+            c1.write(f"**{nom_botiga_mostrat}** — {u['url']}  \nÚltim preu: {preu_text}")
 
-            if c2.button("🧪 Tornar a provar", key=f"test_{u['id']}"):
-                with st.spinner("Provant..."):
-                    preu, error, nou_sel, nou_idx = obtenir_preu_amb_fallback(
-                        u["url"], u["selector_css"], index=u["index_element"]
-                    )
-                if error:
-                    st.error(error)
-                else:
-                    st.success(f"Preu trobat: {preu:.2f} €")
-                    db.guardar_preu(u["id"], preu)
-                    if nou_sel and (nou_sel != u["selector_css"] or nou_idx != u["index_element"]):
-                        db.actualitzar_selector(u["id"], nou_sel, nou_idx)
-                    st.rerun()
+            if u["selector_css"]:
+                if c2.button("🧪 Tornar a provar", key=f"test_{u['id']}"):
+                    with st.spinner("Provant..."):
+                        preu, error, nou_sel, nou_idx = obtenir_preu_amb_fallback(
+                            u["url"], u["selector_css"], index=u["index_element"]
+                        )
+                    if error:
+                        st.error(error + " — pots introduir el preu manualment amb el botó ✏️.")
+                    else:
+                        st.success(f"Preu trobat: {preu:.2f} €")
+                        db.guardar_preu(u["id"], preu)
+                        if nou_sel and (nou_sel != u["selector_css"] or nou_idx != u["index_element"]):
+                            db.actualitzar_selector(u["id"], nou_sel, nou_idx)
+                        st.rerun()
 
-            if c3.button("🔁 Triar altre preu", key=f"retriar_{u['id']}"):
-                st.session_state[f"retriant_{u['id']}"] = True
+                if c3.button("🔁 Triar altre preu", key=f"retriar_{u['id']}"):
+                    st.session_state[f"retriant_{u['id']}"] = True
+            else:
+                c2.write("")
+                c3.write("")
 
-            if c4.button("🗑️", key=f"del_url_{u['id']}"):
+            if c4.button("✏️ Preu manual", key=f"manual_{u['id']}"):
+                st.session_state[f"manual_form_{u['id']}"] = True
+
+            if c5.button("🗑️", key=f"del_url_{u['id']}"):
                 db.eliminar_url(u["id"])
                 st.rerun()
+
+            # Formulari per introduir/corregir el preu manualment.
+            if st.session_state.get(f"manual_form_{u['id']}"):
+                with st.form(f"form_manual_{u['id']}"):
+                    valor_inicial = float(ultim["preu"]) if ultim and ultim["preu"] is not None else 0.0
+                    preu_manual = st.number_input(
+                        f"Preu manual per «{u['botiga']}» (€)",
+                        min_value=0.0, step=0.01, format="%.2f", value=valor_inicial
+                    )
+                    desar = st.form_submit_button("✅ Desar preu manual")
+                    if desar:
+                        db.guardar_preu_manual(u["id"], preu_manual)
+                        st.session_state[f"manual_form_{u['id']}"] = False
+                        st.success(f"Preu manual de {preu_manual:.2f} € desat per «{u['botiga']}» (marcat com a manual)")
+                        st.rerun()
 
             # Permet re-triar quin dels preus de la pàgina és el correcte,
             # útil si la botiga ha canviat de mides o l'app va triar malament.
@@ -265,8 +345,15 @@ with tab_export:
         f"(`{EXCEL_PATH}`) amb les dades més recents — no es crea un Excel nou cada cop."
     )
     if st.button("🔄 Actualitzar Excel"):
-        path = exportar_excel()
-        st.success(f"Fitxer '{path}' actualitzat correctament.")
+        try:
+            path = exportar_excel()
+            st.success(f"Fitxer '{path}' actualitzat correctament.")
+        except PermissionError:
+            st.error(
+                f"No s'ha pogut escriure '{EXCEL_PATH}' perquè sembla que el "
+                "tens obert a l'Excel (o a un altre programa) en aquest moment. "
+                "Tanca'l i torna a prémer el botó."
+            )
 
     if os.path.exists(EXCEL_PATH):
         with open(EXCEL_PATH, "rb") as f:

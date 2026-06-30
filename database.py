@@ -53,9 +53,14 @@ def init_db():
                 preu REAL,
                 data_hora TEXT NOT NULL,
                 error TEXT,
+                es_manual INTEGER DEFAULT 0,
                 FOREIGN KEY (url_id) REFERENCES urls(id)
             )
         """)
+        # Migració suau: afegeix la columna es_manual si la BD és antiga.
+        columnes_hist = [c[1] for c in conn.execute("PRAGMA table_info(historic_preus)").fetchall()]
+        if "es_manual" not in columnes_hist:
+            conn.execute("ALTER TABLE historic_preus ADD COLUMN es_manual INTEGER DEFAULT 0")
 
 
 # ---------- PRODUCTES ----------
@@ -116,31 +121,36 @@ def actualitzar_selector(url_id, nou_selector, nou_index=0):
 
 
 # ---------- HISTORIC PREUS ----------
-def guardar_preu(url_id, preu, error=None):
+def guardar_preu(url_id, preu, error=None, es_manual=0):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO historic_preus (url_id, preu, data_hora, error) VALUES (?, ?, ?, ?)",
-            (url_id, preu, datetime.now().isoformat(timespec="seconds"), error)
+            "INSERT INTO historic_preus (url_id, preu, data_hora, error, es_manual) VALUES (?, ?, ?, ?, ?)",
+            (url_id, preu, datetime.now().strftime("%Y-%m-%d"), error, int(es_manual))
         )
+
+
+def guardar_preu_manual(url_id, preu):
+    """Desa un preu introduït a mà per l'usuari (quan el scraping no funciona)."""
+    guardar_preu(url_id, preu, error=None, es_manual=1)
 
 
 def historic_per_producte(producte_id):
     """Retorna tots els registres de preus de totes les urls d'un producte."""
     with get_conn() as conn:
         return conn.execute("""
-            SELECT h.data_hora, u.botiga, h.preu, h.error
+            SELECT h.data_hora, u.botiga, h.preu, h.error, h.es_manual
             FROM historic_preus h
             JOIN urls u ON u.id = h.url_id
             WHERE u.producte_id = ?
-            ORDER BY h.data_hora
+            ORDER BY h.data_hora, h.id
         """, (producte_id,)).fetchall()
 
 
 def ultim_preu(url_id):
     with get_conn() as conn:
         row = conn.execute("""
-            SELECT preu, data_hora FROM historic_preus
+            SELECT preu, data_hora, es_manual FROM historic_preus
             WHERE url_id=? AND preu IS NOT NULL
-            ORDER BY data_hora DESC LIMIT 1
+            ORDER BY data_hora DESC, id DESC LIMIT 1
         """, (url_id,)).fetchone()
         return row
