@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd
 
 import database as db
-from scraper import detectar_candidats, obtenir_preu, obtenir_preu_amb_fallback
+from scraper import detectar_candidats, detectar_candidats_amb_fallback, obtenir_preu, obtenir_preu_amb_fallback
 from excel_export import exportar_excel, EXCEL_PATH
 
 st.set_page_config(page_title="Seguiment de preus", layout="wide")
@@ -45,12 +45,14 @@ with tab_dashboard:
                         if not u["selector_css"]:
                             # URL configurada com a "només manual": no s'intenta scrapejar.
                             continue
-                        preu, error, nou_sel, nou_idx = obtenir_preu_amb_fallback(
-                            u["url"], u["selector_css"], index=u["index_element"]
+                        preu, error, nou_sel, nou_idx, nou_pw = obtenir_preu_amb_fallback(
+                            u["url"], u["selector_css"],
+                            usar_playwright=bool(u["usa_playwright"]),
+                            index=u["index_element"]
                         )
                         db.guardar_preu(u["id"], preu, error)
                         if nou_sel and (nou_sel != u["selector_css"] or nou_idx != u["index_element"]):
-                            db.actualitzar_selector(u["id"], nou_sel, nou_idx)
+                            db.actualitzar_selector(u["id"], nou_sel, nou_idx, nou_pw)
                         if preu is None:
                             fallits.append(u["botiga"])
                 if fallits:
@@ -236,24 +238,33 @@ with tab_urls:
             if not botiga.strip() or not url.strip():
                 st.warning("Cal indicar el nom de la botiga i la URL")
             else:
-                with st.spinner("Provant diferents llocs de la pàgina per trobar el preu..."):
-                    candidats, error = detectar_candidats(url.strip())
+                with st.spinner(
+                    "Provant diferents llocs de la pàgina per trobar el preu "
+                    "(dades estructurades, selectors habituals i, si cal, "
+                    "renderitzat amb JavaScript)..."
+                ):
+                    candidats, error, necessita_pw = detectar_candidats_amb_fallback(url.strip())
 
                 if not candidats:
                     st.error(error)
                     st.session_state["url_pendent"] = (botiga.strip(), url.strip())
                 elif len(candidats) == 1:
                     c = candidats[0]
-                    db.afegir_url(producte_id2, botiga.strip(), url.strip(), c["selector"], c["index"])
+                    db.afegir_url(
+                        producte_id2, botiga.strip(), url.strip(),
+                        c["selector"], c["index"], necessita_pw
+                    )
                     nova_url = db.llistar_urls(producte_id2)[-1]
                     db.guardar_preu(nova_url["id"], c["preu"])
-                    st.success(f"Preu trobat: **{c['preu']:.2f} €**. URL afegida!")
+                    avis_js = " (calia renderitzar la pàgina amb JavaScript)" if necessita_pw else ""
+                    st.success(f"Preu trobat: **{c['preu']:.2f} €**{avis_js}. URL afegida!")
                     st.rerun()
                 else:
                     # Diversos preus trobats: cal que l'usuari triï el correcte.
                     st.session_state["candidats_pendents"] = candidats
                     st.session_state["candidats_botiga"] = botiga.strip()
                     st.session_state["candidats_url"] = url.strip()
+                    st.session_state["candidats_necessita_pw"] = necessita_pw
 
         # Si hi ha diversos candidats pendents de triar
         if "candidats_pendents" in st.session_state:
@@ -273,13 +284,15 @@ with tab_urls:
                 c = candidats[idx_triat]
                 botiga_p = st.session_state["candidats_botiga"]
                 url_p = st.session_state["candidats_url"]
-                db.afegir_url(producte_id2, botiga_p, url_p, c["selector"], c["index"])
+                necessita_pw = st.session_state.get("candidats_necessita_pw", False)
+                db.afegir_url(producte_id2, botiga_p, url_p, c["selector"], c["index"], necessita_pw)
                 nova_url = db.llistar_urls(producte_id2)[-1]
                 db.guardar_preu(nova_url["id"], c["preu"])
                 st.success(f"URL afegida amb el preu {c['preu']:.2f} €")
                 del st.session_state["candidats_pendents"]
                 del st.session_state["candidats_botiga"]
                 del st.session_state["candidats_url"]
+                st.session_state.pop("candidats_necessita_pw", None)
                 st.rerun()
 
         # Si la detecció automàtica ha fallat del tot
@@ -336,8 +349,10 @@ with tab_urls:
             if u["selector_css"]:
                 if c2.button("🧪 Tornar a provar", key=f"test_{u['id']}"):
                     with st.spinner("Provant..."):
-                        preu, error, nou_sel, nou_idx = obtenir_preu_amb_fallback(
-                            u["url"], u["selector_css"], index=u["index_element"]
+                        preu, error, nou_sel, nou_idx, nou_pw = obtenir_preu_amb_fallback(
+                            u["url"], u["selector_css"],
+                            usar_playwright=bool(u["usa_playwright"]),
+                            index=u["index_element"]
                         )
                     if error:
                         st.error(error + " — pots introduir el preu manualment amb el botó ✏️.")
@@ -345,7 +360,7 @@ with tab_urls:
                         st.success(f"Preu trobat: {preu:.2f} €")
                         db.guardar_preu(u["id"], preu)
                         if nou_sel and (nou_sel != u["selector_css"] or nou_idx != u["index_element"]):
-                            db.actualitzar_selector(u["id"], nou_sel, nou_idx)
+                            db.actualitzar_selector(u["id"], nou_sel, nou_idx, nou_pw)
                         st.rerun()
 
                 if c3.button("🔁 Triar altre preu", key=f"retriar_{u['id']}"):
@@ -380,7 +395,7 @@ with tab_urls:
             # útil si la botiga ha canviat de mides o l'app va triar malament.
             if st.session_state.get(f"retriant_{u['id']}"):
                 with st.spinner("Cercant tots els preus de la pàgina..."):
-                    candidats2, error3 = detectar_candidats(u["url"])
+                    candidats2, error3, necessita_pw2 = detectar_candidats_amb_fallback(u["url"])
                 if not candidats2:
                     st.error(error3 or "No s'ha trobat cap preu")
                 else:
@@ -391,7 +406,7 @@ with tab_urls:
                     if st.button("✅ Confirmar", key=f"confirma2_{u['id']}"):
                         idx2 = opcions2.index(tria2)
                         c2sel = candidats2[idx2]
-                        db.actualitzar_selector(u["id"], c2sel["selector"], c2sel["index"])
+                        db.actualitzar_selector(u["id"], c2sel["selector"], c2sel["index"], necessita_pw2)
                         db.guardar_preu(u["id"], c2sel["preu"])
                         st.session_state[f"retriant_{u['id']}"] = False
                         st.success(f"Actualitzat a {c2sel['preu']:.2f} €")

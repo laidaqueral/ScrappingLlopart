@@ -6,6 +6,7 @@ Funciona amb webs estàtiques (requests + BeautifulSoup). Si una botiga carrega
 el preu amb JavaScript, cal activar el mode Playwright (veure usar_playwright=True).
 """
 import re
+import json
 import requests
 from bs4 import BeautifulSoup
 
@@ -65,6 +66,47 @@ SELECTORS_COMUNS = [
 ]
 
 
+def _candidats_json_ld(soup):
+    """Moltes botigues (Woocommerce, Shopify, Prestashop...) inclouen el
+    preu en un bloc de 'dades estructurades' pensat per a Google, separat
+    del disseny visual de la pàgina. És una font molt fiable i no depèn
+    del CSS, així que és la primera alternativa que provem si els
+    selectors habituals no troben res."""
+    candidats = []
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+        except (TypeError, ValueError):
+            continue
+        candidats.extend(_cercar_preus_json(data))
+    return candidats
+
+
+def _cercar_preus_json(node, context=""):
+    """Cerca recursivament claus de preu ('price', 'lowPrice', 'highPrice')
+    dins d'un bloc de dades JSON-LD, que pot tenir estructures anidades."""
+    trobats = []
+    if isinstance(node, dict):
+        nom_producte = node.get("name") or context
+        for clau in ("price", "lowPrice", "highPrice"):
+            if clau in node:
+                preu = _netejar_preu(str(node[clau]))
+                if preu is not None and 0 < preu < 100000:
+                    trobats.append({
+                        "selector": f"json-ld:{clau}",
+                        "index": 0,
+                        "preu": preu,
+                        "text": str(node[clau]),
+                        "context": nom_producte or "(dades estructurades JSON-LD)",
+                    })
+        for v in node.values():
+            trobats.extend(_cercar_preus_json(v, nom_producte))
+    elif isinstance(node, list):
+        for item in node:
+            trobats.extend(_cercar_preus_json(item, context))
+    return trobats
+
+
 def _obtenir_html(url, usar_playwright, timeout):
     if usar_playwright:
         return _obtenir_html_playwright(url, timeout)
@@ -119,6 +161,15 @@ def detectar_candidats(url, usar_playwright=False, timeout=15):
     candidats = []
     vistos = set()
 
+    # 1) Primer provem les dades estructurades JSON-LD (molt fiables i
+    #    independents del disseny visual de la pàgina).
+    for c in _candidats_json_ld(soup):
+        clau = (round(c["preu"], 2),)
+        if clau not in vistos:
+            vistos.add(clau)
+            candidats.append(c)
+
+    # 2) Després, la llista de selectors CSS habituals.
     for sel in SELECTORS_COMUNS:
         try:
             elements = soup.select(sel)
@@ -176,6 +227,33 @@ def _contexte_proper(element):
     return contexte[:150] if contexte else "(sense context detectat)"
 
 
+def detectar_candidats_amb_fallback(url, timeout=15):
+    """
+    Intenta detectar el preu de la manera ràpida primer (peticions normals +
+    JSON-LD + selectors CSS). Si no troba res I Playwright està instal·lat
+    a l'ordinador, ho torna a provar automàticament amb Playwright (útil
+    per a webs que carreguen el preu amb JavaScript), sense que l'usuari
+    hagi de marcar-ho manualment.
+
+    Retorna (candidats, error, es_necessita_playwright: bool).
+    """
+    candidats, error = detectar_candidats(url, usar_playwright=False, timeout=timeout)
+    if candidats:
+        return candidats, None, False
+
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        # Playwright no instal·lat: ens quedem amb el resultat/error original.
+        return candidats, error, False
+
+    candidats_pw, error_pw = detectar_candidats(url, usar_playwright=True, timeout=timeout)
+    if candidats_pw:
+        return candidats_pw, None, True
+
+    return [], error_pw or error, False
+
+
 def obtenir_preu(url, selector_css, usar_playwright=False, timeout=15, index=0):
     """
     Llegeix el preu fent servir un selector concret ja conegut, agafant
@@ -208,19 +286,21 @@ def obtenir_preu(url, selector_css, usar_playwright=False, timeout=15, index=0):
 def obtenir_preu_amb_fallback(url, selector_css, usar_playwright=False, timeout=15, index=0):
     """
     Intenta llegir el preu amb el selector+index ja guardats. Si falla,
-    torna a intentar detectar-lo automàticament (agafant el primer candidat).
-    Retorna (preu, error, nou_selector_o_None, nou_index_o_None).
+    torna a intentar detectar-lo automàticament: primer amb JSON-LD i els
+    selectors CSS habituals, i si tampoc troba res, amb Playwright (si està
+    instal·lat), agafant el primer candidat trobat.
+    Retorna (preu, error, nou_selector_o_None, nou_index_o_None, nou_usar_playwright_o_None).
     """
     preu, error = obtenir_preu(url, selector_css, usar_playwright, timeout, index)
     if preu is not None:
-        return preu, None, None, None
+        return preu, None, None, None, None
 
-    candidats, error2 = detectar_candidats(url, usar_playwright, timeout)
+    candidats, error2, es_necessita_playwright = detectar_candidats_amb_fallback(url, timeout)
     if candidats:
         c = candidats[0]
-        return c["preu"], None, c["selector"], c["index"]
+        return c["preu"], None, c["selector"], c["index"], es_necessita_playwright
 
-    return None, error2 or error, None, None
+    return None, error2 or error, None, None, None
 
 
 def _obtenir_html_playwright(url, timeout):

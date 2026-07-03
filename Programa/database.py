@@ -48,14 +48,17 @@ def init_db():
                 selector_css TEXT NOT NULL,
                 index_element INTEGER DEFAULT 0,
                 actiu INTEGER DEFAULT 1,
+                usa_playwright INTEGER DEFAULT 0,
                 FOREIGN KEY (producte_id) REFERENCES productes(id)
             )
         """)
         # Migració suau per bases de dades creades amb una versió anterior
-        # de l'esquema, que no tenien la columna index_element.
+        # de l'esquema, que no tenien la columna index_element ni usa_playwright.
         columnes = [c[1] for c in conn.execute("PRAGMA table_info(urls)").fetchall()]
         if "index_element" not in columnes:
             conn.execute("ALTER TABLE urls ADD COLUMN index_element INTEGER DEFAULT 0")
+        if "usa_playwright" not in columnes:
+            conn.execute("ALTER TABLE urls ADD COLUMN usa_playwright INTEGER DEFAULT 0")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS historic_preus (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,11 +110,12 @@ def eliminar_producte(producte_id):
 
 
 # ---------- URLS ----------
-def afegir_url(producte_id, botiga, url, selector_css, index_element=0):
+def afegir_url(producte_id, botiga, url, selector_css, index_element=0, usa_playwright=0):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO urls (producte_id, botiga, url, selector_css, index_element) VALUES (?, ?, ?, ?, ?)",
-            (producte_id, botiga, url, selector_css, index_element)
+            "INSERT INTO urls (producte_id, botiga, url, selector_css, index_element, usa_playwright) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (producte_id, botiga, url, selector_css, index_element, int(usa_playwright))
         )
 
 
@@ -130,12 +134,18 @@ def eliminar_url(url_id):
         conn.execute("DELETE FROM urls WHERE id=?", (url_id,))
 
 
-def actualitzar_selector(url_id, nou_selector, nou_index=0):
+def actualitzar_selector(url_id, nou_selector, nou_index=0, usa_playwright=None):
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE urls SET selector_css=?, index_element=? WHERE id=?",
-            (nou_selector, nou_index, url_id)
-        )
+        if usa_playwright is None:
+            conn.execute(
+                "UPDATE urls SET selector_css=?, index_element=? WHERE id=?",
+                (nou_selector, nou_index, url_id)
+            )
+        else:
+            conn.execute(
+                "UPDATE urls SET selector_css=?, index_element=?, usa_playwright=? WHERE id=?",
+                (nou_selector, nou_index, int(usa_playwright), url_id)
+            )
 
 
 # ---------- HISTORIC PREUS ----------
