@@ -13,7 +13,7 @@ from excel_export import exportar_excel, EXCEL_PATH
 st.set_page_config(page_title="Seguiment de preus", layout="wide")
 db.init_db()
 
-st.title("🍾 Seguiment de preus — Escumosos")
+st.title("🍾 Seguiment de preus")
 
 tab_dashboard, tab_productes, tab_urls, tab_export = st.tabs(
     ["📊 Dashboard", "📦 Productes", "🔗 URLs / Botigues", "📥 Excel"]
