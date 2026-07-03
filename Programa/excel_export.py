@@ -24,8 +24,8 @@ EXCEL_PATH = os.environ.get("PREUS_EXCEL_PATH", "seguiment_preus.xlsx")
 MANUAL_FILL = PatternFill(start_color="FFE8B8", end_color="FFE8B8", fill_type="solid")
 MANUAL_FONT = Font(italic=True)
 BOLD_FONT = Font(bold=True)
-PCT_POSITIU_FONT = Font(color="C00000")   # vermell: més car que el preu de botiga
-PCT_NEGATIU_FONT = Font(color="007A33")   # verd: més barat que el preu de botiga
+PCT_POSITIU_FONT = Font(color="007A33")   # verd: % positiu
+PCT_NEGATIU_FONT = Font(color="C00000")   # vermell: % negatiu
 
 
 def _nom_full_valid(nom):
@@ -103,12 +103,12 @@ def exportar_excel(path=None):
 
                 df_pivot.insert(1, "% vs preu botiga", percentatges)
 
-                # Ordena les files pel % vs preu botiga, de més car a més
-                # barat. Les botigues sense % calculable (perquè el producte
+                # Ordena les files pel % vs preu botiga, de més barat a més
+                # car. Les botigues sense % calculable (perquè el producte
                 # no té preu de referència, o encara no té cap preu) queden
                 # al final.
                 df_pivot = df_pivot.sort_values(
-                    "% vs preu botiga", ascending=False, na_position="last"
+                    "% vs preu botiga", ascending=True, na_position="last"
                 ).reset_index(drop=True)
 
             nom_full = _nom_full_valid(prod["nom"])

@@ -109,14 +109,14 @@ with tab_dashboard:
 
             st.divider()
 
-            # ---------- Preus per botiga, de major a menor ----------
+            # ---------- Preus per botiga, de menor a major ----------
             st.subheader("Preus per botiga")
             if preu_referencia:
                 st.caption(f"Preu de botiga (referència): {preu_referencia:.2f} €")
 
             dades_ordenades = sorted(
                 dades_botigues,
-                key=lambda d: (d["preu"] is None, -(d["preu"] or 0))
+                key=lambda d: (d["preu"] is None, d["preu"] or 0)
             )
 
             BOTIGUES_PER_FILA = 5
@@ -134,7 +134,7 @@ with tab_dashboard:
                                 delta_color="inverse",  # preu més baix = verd (bo)
                             )
                             if d["pct_ref"] is not None:
-                                color = "red" if d["pct_ref"] > 0 else "green"
+                                color = "green" if d["pct_ref"] > 0 else "red"
                                 st.caption(f":{color}[{d['pct_ref']:+.1f}%] vs preu botiga")
                             if d["es_manual"]:
                                 st.caption("✏️ Preu manual")
