@@ -5,7 +5,6 @@ Executar amb:  streamlit run app.py
 import os
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 
 import database as db
 from scraper import detectar_candidats, obtenir_preu, obtenir_preu_amb_fallback
@@ -29,9 +28,11 @@ with tab_dashboard:
     if not productes:
         st.info("Encara no hi ha productes. Vés a la pestanya 'Productes' per afegir-ne un.")
     else:
-        noms = {p["nom"]: p["id"] for p in productes}
+        noms = {p["nom"]: p for p in productes}
         nom_sel = st.selectbox("Selecciona un producte", list(noms.keys()))
-        producte_id = noms[nom_sel]
+        prod_sel = noms[nom_sel]
+        producte_id = prod_sel["id"]
+        preu_referencia = prod_sel["preu_referencia"]
 
         urls = db.llistar_urls(producte_id)
 
@@ -62,50 +63,90 @@ with tab_dashboard:
                     st.success("Preus actualitzats!")
                 st.rerun()
 
-        registres = db.historic_per_producte(producte_id)
-
-        if not registres:
-            st.warning("Encara no hi ha cap preu registrat per aquest producte. Prem 'Actualitza preus ara'.")
+        if not urls:
+            st.warning("Encara no hi ha cap URL configurada per aquest producte.")
         else:
-            df = pd.DataFrame(
-                [(r["data_hora"], r["botiga"], r["preu"], r["error"],
-                  "Sí" if r["es_manual"] else "No") for r in registres],
-                columns=["Data", "Botiga", "Preu", "Error", "Manual"]
-            )
-            df["Data"] = pd.to_datetime(df["Data"], format="mixed")
+            # Recollim, per a cada botiga: últim preu, preu anterior (per calcular
+            # el canvi respecte l'actualització anterior) i el % vs preu de botiga.
+            dades_botigues = []
+            for u in urls:
+                recents = db.historic_recent(u["id"], 2)
+                ultim = recents[0] if recents else None
+                anterior = recents[1] if len(recents) > 1 else None
 
-            fig = px.line(
-                df.dropna(subset=["Preu"]),
-                x="Data", y="Preu", color="Botiga", markers=True,
-                title=f"Evolució de preu — {nom_sel}"
-            )
-            fig.update_layout(yaxis_title="Preu (€)", xaxis_title="Data")
-            fig.update_xaxes(
-                type="date",
-                dtick=86400000,  # un dia, en mil·lisegons: força que cada "tick" sigui un dia sencer
-                tickformat="%d-%m-%Y",
-            )
-            st.plotly_chart(fig, use_container_width=True)
+                preu_actual = ultim["preu"] if ultim else None
+                preu_anterior = anterior["preu"] if anterior else None
+                delta = (preu_actual - preu_anterior) if (preu_actual is not None and preu_anterior is not None) else None
 
-            st.subheader("Últim preu per botiga")
+                pct_ref = None
+                if preu_actual is not None and preu_referencia:
+                    pct_ref = (preu_actual - preu_referencia) / preu_referencia * 100
+
+                dades_botigues.append({
+                    "botiga": u["botiga"],
+                    "preu": preu_actual,
+                    "delta": delta,
+                    "pct_ref": pct_ref,
+                    "es_manual": bool(ultim["es_manual"]) if ultim else False,
+                })
+
+            # ---------- Canvis recents ----------
+            canvis = [d for d in dades_botigues if d["delta"] not in (None, 0)]
+            st.subheader("📣 Canvis des de l'última actualització")
+            if not canvis:
+                st.caption("Cap canvi de preu respecte l'actualització anterior.")
+            else:
+                for d in canvis:
+                    fletxa = "🔺" if d["delta"] > 0 else "🔻"
+                    color = "red" if d["delta"] > 0 else "green"
+                    st.markdown(
+                        f"{fletxa} **{d['botiga']}**: "
+                        f":{color}[{d['delta']:+.2f} €] "
+                        f"(ara {d['preu']:.2f} €)"
+                    )
+
+            st.divider()
+
+            # ---------- Preus per botiga, de major a menor ----------
+            st.subheader("Preus per botiga")
+            if preu_referencia:
+                st.caption(f"Preu de botiga (referència): {preu_referencia:.2f} €")
+
+            dades_ordenades = sorted(
+                dades_botigues,
+                key=lambda d: (d["preu"] is None, -(d["preu"] or 0))
+            )
+
             BOTIGUES_PER_FILA = 5
-            for i in range(0, len(urls), BOTIGUES_PER_FILA):
-                fila = urls[i:i + BOTIGUES_PER_FILA]
+            for i in range(0, len(dades_ordenades), BOTIGUES_PER_FILA):
+                fila = dades_ordenades[i:i + BOTIGUES_PER_FILA]
                 cols = st.columns(BOTIGUES_PER_FILA)
-                for c, u in zip(cols, fila):
-                    ultim = db.ultim_preu(u["id"])
+                for c, d in zip(cols, fila):
                     with c:
-                        if ultim and ultim["preu"] is not None:
-                            etiqueta = u["botiga"] + (" ✏️" if ultim["es_manual"] else "")
-                            st.metric(etiqueta, f"{ultim['preu']:.2f} €")
-                            if ultim["es_manual"]:
+                        if d["preu"] is not None:
+                            etiqueta = d["botiga"] + (" ✏️" if d["es_manual"] else "")
+                            st.metric(
+                                etiqueta,
+                                f"{d['preu']:.2f} €",
+                                delta=f"{d['delta']:+.2f} €" if d["delta"] else None,
+                                delta_color="inverse",  # preu més baix = verd (bo)
+                            )
+                            if d["pct_ref"] is not None:
+                                color = "red" if d["pct_ref"] > 0 else "green"
+                                st.caption(f":{color}[{d['pct_ref']:+.1f}%] vs preu botiga")
+                            if d["es_manual"]:
                                 st.caption("✏️ Preu manual")
                         else:
-                            st.metric(u["botiga"], "—")
+                            st.metric(d["botiga"], "—")
 
             with st.expander("Veure dades en taula"):
-                df_taula = df.copy()
-                df_taula["Data"] = df_taula["Data"].dt.strftime("%d-%m-%Y")
+                registres = db.historic_per_producte(producte_id)
+                df_taula = pd.DataFrame(
+                    [(r["data_hora"], r["botiga"], r["preu"], r["error"],
+                      "Sí" if r["es_manual"] else "No") for r in registres],
+                    columns=["Data", "Botiga", "Preu", "Error", "Manual"]
+                )
+                df_taula["Data"] = pd.to_datetime(df_taula["Data"], format="mixed").dt.strftime("%d-%m-%Y")
                 df_taula = df_taula.sort_values("Data", ascending=False)
 
                 n_registres = len(df_taula)
@@ -126,11 +167,20 @@ with tab_productes:
     with st.form("form_producte", clear_on_submit=True):
         nom = st.text_input("Nom del producte (ex: Cava Brut Nature 75cl)")
         categoria = st.text_input("Categoria (opcional)")
+        preu_ref = st.number_input(
+            "Preu de botiga (referència, €) — opcional",
+            min_value=0.0, step=0.01, format="%.2f",
+            help="Preu oficial/de referència del producte. A l'Excel es mostrarà "
+                 "el % que cada botiga està per sobre o per sota d'aquest preu."
+        )
         enviat = st.form_submit_button("Afegir producte")
         if enviat:
             if nom.strip():
                 try:
-                    db.afegir_producte(nom.strip(), categoria.strip())
+                    db.afegir_producte(
+                        nom.strip(), categoria.strip(),
+                        preu_ref if preu_ref > 0 else None
+                    )
                     st.success(f"Producte '{nom}' afegit!")
                     st.rerun()
                 except Exception as e:
@@ -142,9 +192,21 @@ with tab_productes:
     st.subheader("Productes existents")
     productes = db.llistar_productes()
     for p in productes:
-        c1, c2 = st.columns([5, 1])
-        c1.write(f"**{p['nom']}**  ·  {p['categoria'] or '—'}")
-        if c2.button("🗑️ Eliminar", key=f"del_prod_{p['id']}"):
+        c1, c2, c3 = st.columns([4, 2, 1])
+        preu_ref_text = f"{p['preu_referencia']:.2f} €" if p["preu_referencia"] else "sense definir"
+        c1.write(f"**{p['nom']}**  ·  {p['categoria'] or '—'}  ·  Preu botiga: {preu_ref_text}")
+
+        with c2.popover("✏️ Preu botiga"):
+            nou_preu_ref = st.number_input(
+                "Preu de botiga (€)", min_value=0.0, step=0.01, format="%.2f",
+                value=float(p["preu_referencia"]) if p["preu_referencia"] else 0.0,
+                key=f"preu_ref_{p['id']}"
+            )
+            if st.button("Desar", key=f"desar_ref_{p['id']}"):
+                db.actualitzar_preu_referencia(p["id"], nou_preu_ref if nou_preu_ref > 0 else None)
+                st.rerun()
+
+        if c3.button("🗑️ Eliminar", key=f"del_prod_{p['id']}"):
             db.eliminar_producte(p["id"])
             st.rerun()
 

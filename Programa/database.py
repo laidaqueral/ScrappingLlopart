@@ -2,11 +2,16 @@
 Mòdul de base de dades per a l'app de seguiment de preus.
 Utilitza SQLite (un sol fitxer, sense necessitat de servidor).
 """
+import os
 import sqlite3
 from datetime import datetime
 from contextlib import contextmanager
 
-DB_PATH = "preus.db"
+# Per defecte fa servir un fitxer local. Si vols que tot l'equip comparteixi
+# la mateixa base de dades des d'una carpeta de xarxa, defineix la variable
+# d'entorn PREUS_DB_PATH (per exemple al .bat que llança l'app) apuntant a
+# una ruta de xarxa, ex: \\SERVIDOR\Carpeta\preus.db
+DB_PATH = os.environ.get("PREUS_DB_PATH", "preus.db")
 
 
 @contextmanager
@@ -26,9 +31,14 @@ def init_db():
             CREATE TABLE IF NOT EXISTS productes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nom TEXT NOT NULL UNIQUE,
-                categoria TEXT
+                categoria TEXT,
+                preu_referencia REAL
             )
         """)
+        # Migració suau: afegeix la columna preu_referencia si la BD és antiga.
+        columnes_prod = [c[1] for c in conn.execute("PRAGMA table_info(productes)").fetchall()]
+        if "preu_referencia" not in columnes_prod:
+            conn.execute("ALTER TABLE productes ADD COLUMN preu_referencia REAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS urls (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,11 +74,19 @@ def init_db():
 
 
 # ---------- PRODUCTES ----------
-def afegir_producte(nom, categoria=""):
+def afegir_producte(nom, categoria="", preu_referencia=None):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO productes (nom, categoria) VALUES (?, ?)",
-            (nom, categoria)
+            "INSERT INTO productes (nom, categoria, preu_referencia) VALUES (?, ?, ?)",
+            (nom, categoria, preu_referencia)
+        )
+
+
+def actualitzar_preu_referencia(producte_id, preu_referencia):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE productes SET preu_referencia=? WHERE id=?",
+            (preu_referencia, producte_id)
         )
 
 
@@ -154,3 +172,14 @@ def ultim_preu(url_id):
             ORDER BY data_hora DESC, id DESC LIMIT 1
         """, (url_id,)).fetchone()
         return row
+
+
+def historic_recent(url_id, n=2):
+    """Retorna els darrers n preus (no nuls) d'una URL, més recent primer.
+    Útil per calcular si el preu ha canviat respecte l'actualització anterior."""
+    with get_conn() as conn:
+        return conn.execute("""
+            SELECT preu, data_hora, es_manual FROM historic_preus
+            WHERE url_id=? AND preu IS NOT NULL
+            ORDER BY data_hora DESC, id DESC LIMIT ?
+        """, (url_id, n)).fetchall()
