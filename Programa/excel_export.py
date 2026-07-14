@@ -280,7 +280,7 @@ def exportar_excel(path=None):
         ws.column_dimensions["B"].width = 16   # %
         for d_idx in range(n_dates):
             ws.column_dimensions[get_column_letter(3 + d_idx * 2)].width = 10    # Preu
-            ws.column_dimensions[get_column_letter(4 + d_idx * 2)].width = 22    # Notes
+            ws.column_dimensions[get_column_letter(4 + d_idx * 2)].width = 15    # Notes
 
         # Alçada de les files de dades
         for fila_excel in range(3, n_rows + 3):
