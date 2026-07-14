@@ -59,6 +59,8 @@ def init_db():
             conn.execute("ALTER TABLE urls ADD COLUMN index_element INTEGER DEFAULT 0")
         if "usa_playwright" not in columnes:
             conn.execute("ALTER TABLE urls ADD COLUMN usa_playwright INTEGER DEFAULT 0")
+        if "destacada" not in columnes:
+            conn.execute("ALTER TABLE urls ADD COLUMN destacada INTEGER DEFAULT 0")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS historic_preus (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,22 +112,33 @@ def eliminar_producte(producte_id):
 
 
 # ---------- URLS ----------
-def afegir_url(producte_id, botiga, url, selector_css, index_element=0, usa_playwright=0):
+def afegir_url(producte_id, botiga, url, selector_css, index_element=0, usa_playwright=0, destacada=0):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO urls (producte_id, botiga, url, selector_css, index_element, usa_playwright) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (producte_id, botiga, url, selector_css, index_element, int(usa_playwright))
+            "INSERT INTO urls (producte_id, botiga, url, selector_css, index_element, usa_playwright, destacada) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (producte_id, botiga, url, selector_css, index_element, int(usa_playwright), int(destacada))
         )
 
 
 def llistar_urls(producte_id=None):
+    """Retorna les URLs ordenades: primer les destacades, després la resta, totes per botiga."""
     with get_conn() as conn:
         if producte_id:
             return conn.execute(
-                "SELECT * FROM urls WHERE producte_id=? ORDER BY botiga", (producte_id,)
+                "SELECT * FROM urls WHERE producte_id=? ORDER BY destacada DESC, botiga",
+                (producte_id,)
             ).fetchall()
-        return conn.execute("SELECT * FROM urls ORDER BY botiga").fetchall()
+        return conn.execute("SELECT * FROM urls ORDER BY destacada DESC, botiga").fetchall()
+
+
+def toggle_destacada(url_id):
+    """Activa o desactiva el flag de destacada d'una URL."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE urls SET destacada = CASE WHEN destacada=1 THEN 0 ELSE 1 END WHERE id=?",
+            (url_id,)
+        )
 
 
 def eliminar_url(url_id):

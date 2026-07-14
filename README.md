@@ -52,6 +52,7 @@ print("Actualització completada")
 ```
 
 I programa'l:
+
 - **Linux/Mac**: amb `cron` (`crontab -e` i afegir una línia tipus
   `0 8 * * * cd /ruta/al/projecte && python actualitza_diari.py`)
 - **Windows**: amb el "Programador de tasques" (Task Scheduler)

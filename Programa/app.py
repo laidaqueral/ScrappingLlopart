@@ -8,15 +8,15 @@ import pandas as pd
 
 import database as db
 from scraper import detectar_candidats, detectar_candidats_amb_fallback, obtenir_preu, obtenir_preu_amb_fallback
-from excel_export import exportar_excel, EXCEL_PATH
+from excel_export import exportar_excel, escriure_nota_excel, EXCEL_PATH
 
-st.set_page_config(page_title="Seguiment de preus", layout="wide")
+st.set_page_config(page_title="Seguiment de preus web", layout="wide")
 db.init_db()
 
-st.title("🍾 Seguiment de preus")
+st.title("🍾 Seguiment de preus web")
 
 tab_dashboard, tab_productes, tab_urls, tab_export = st.tabs(
-    ["📊 Dashboard", "📦 Productes", "🔗 URLs / Botigues", "📥 Excel"]
+    ["📊 Inici", "📦 Productes", "🔗 Afegir webs", "📥 Excel"]
 )
 
 # ============================================================
@@ -36,34 +36,64 @@ with tab_dashboard:
 
         urls = db.llistar_urls(producte_id)
 
-        col1, col2 = st.columns([1, 4])
+        col1, col2, col3 = st.columns([1.3, 1.7, 2])
         with col1:
-            if st.button("🔄 Actualitza preus ara", use_container_width=True):
-                fallits = []
-                with st.spinner("Consultant les webs..."):
-                    for u in urls:
-                        if not u["selector_css"]:
-                            # URL configurada com a "només manual": no s'intenta scrapejar.
-                            continue
-                        preu, error, nou_sel, nou_idx, nou_pw = obtenir_preu_amb_fallback(
-                            u["url"], u["selector_css"],
-                            usar_playwright=bool(u["usa_playwright"]),
-                            index=u["index_element"]
-                        )
-                        db.guardar_preu(u["id"], preu, error)
-                        if nou_sel and (nou_sel != u["selector_css"] or nou_idx != u["index_element"]):
-                            db.actualitzar_selector(u["id"], nou_sel, nou_idx, nou_pw)
-                        if preu is None:
-                            fallits.append(u["botiga"])
-                if fallits:
-                    st.warning(
-                        "No s'ha pogut extreure el preu automàticament per: "
-                        + ", ".join(fallits)
-                        + ". Pots introduir-lo a mà a la pestanya 'URLs / Botigues'."
+            actualitza_clicat = st.button("🔄 Actualitza preus ara", use_container_width=True)
+        with col2:
+            campanya_activa = st.checkbox("🎯 Campanya", key="campanya_check")
+        with col3:
+            nota_campanya = st.text_input(
+                "Nota de campanya",
+                key="campanya_nota",
+                placeholder="Ex: Campanya Nadal -10%",
+                disabled=not campanya_activa,
+                label_visibility="collapsed",
+            )
+
+        if actualitza_clicat:
+            fallits = []
+            botigues_actualitzades = []
+            with st.spinner("Consultant les webs..."):
+                for u in urls:
+                    if not u["selector_css"]:
+                        # URL configurada com a "només manual": no s'intenta scrapejar.
+                        continue
+                    preu, error, nou_sel, nou_idx, nou_pw = obtenir_preu_amb_fallback(
+                        u["url"], u["selector_css"],
+                        usar_playwright=bool(u["usa_playwright"]),
+                        index=u["index_element"]
                     )
-                else:
-                    st.success("Preus actualitzats!")
-                st.rerun()
+                    db.guardar_preu(u["id"], preu, error)
+                    if nou_sel and (nou_sel != u["selector_css"] or nou_idx != u["index_element"]):
+                        db.actualitzar_selector(u["id"], nou_sel, nou_idx, nou_pw)
+                    if preu is None:
+                        fallits.append(u["botiga"])
+                    else:
+                        botigues_actualitzades.append(u["botiga"])
+
+            nota_desada = False
+            if campanya_activa and nota_campanya.strip() and botigues_actualitzades:
+                from datetime import date
+                try:
+                    exportar_excel()  # assegura que la columna d'avui existeix a l'Excel
+                    avui = date.today().strftime("%Y-%m-%d")
+                    for botiga in botigues_actualitzades:
+                        escriure_nota_excel(botiga, avui, nota_campanya.strip())
+                    nota_desada = True
+                except Exception:
+                    pass  # si l'Excel no es pot escriure (obert, etc.), no és crític
+
+            if fallits:
+                st.warning(
+                    "No s'ha pogut extreure el preu automàticament per: "
+                    + ", ".join(fallits)
+                    + ". Pots introduir-lo a mà a la pestanya 'Afegir webs'."
+                )
+            else:
+                st.success("Preus actualitzats!")
+            if nota_desada:
+                st.success(f"🎯 Nota «{nota_campanya.strip()}» afegida a totes les botigues actualitzades.")
+            st.rerun()
 
         if not urls:
             st.warning("Encara no hi ha cap URL configurada per aquest producte.")
@@ -90,6 +120,7 @@ with tab_dashboard:
                     "delta": delta,
                     "pct_ref": pct_ref,
                     "es_manual": bool(ultim["es_manual"]) if ultim else False,
+                    "destacada": bool(u["destacada"]) if "destacada" in u.keys() else False,
                 })
 
             # ---------- Canvis recents ----------
@@ -114,32 +145,47 @@ with tab_dashboard:
             if preu_referencia:
                 st.caption(f"Preu de botiga (referència): {preu_referencia:.2f} €")
 
+            # Destacades primer, després per preu ascendent
             dades_ordenades = sorted(
                 dades_botigues,
-                key=lambda d: (d["preu"] is None, d["preu"] or 0)
+                key=lambda d: (not d["destacada"], d["preu"] is None, d["preu"] or 0)
             )
 
+            # Separem destacades de la resta per mostrar-les en seccions
+            destacades = [d for d in dades_ordenades if d["destacada"]]
+            resta = [d for d in dades_ordenades if not d["destacada"]]
+
+            def mostrar_botigues(llista, per_fila=5):
+                for i in range(0, len(llista), per_fila):
+                    fila = llista[i:i + per_fila]
+                    cols = st.columns(per_fila)
+                    for c, d in zip(cols, fila):
+                        with c:
+                            if d["preu"] is not None:
+                                etiqueta = ("⭐ " if d["destacada"] else "") + d["botiga"] + (" ✏️" if d["es_manual"] else "")
+                                st.metric(
+                                    etiqueta,
+                                    f"{d['preu']:.2f} €",
+                                    delta=f"{d['delta']:+.2f} €" if d["delta"] else None,
+                                    delta_color="inverse",
+                                )
+                                if d["pct_ref"] is not None:
+                                    color = "green" if d["pct_ref"] > 0 else "red"
+                                    st.caption(f":{color}[{d['pct_ref']:+.1f}%] vs preu botiga")
+                                if d["es_manual"]:
+                                    st.caption("✏️ Preu manual")
+                            else:
+                                etiqueta = ("⭐ " if d["destacada"] else "") + d["botiga"]
+                                st.metric(etiqueta, "—")
+
             BOTIGUES_PER_FILA = 5
-            for i in range(0, len(dades_ordenades), BOTIGUES_PER_FILA):
-                fila = dades_ordenades[i:i + BOTIGUES_PER_FILA]
-                cols = st.columns(BOTIGUES_PER_FILA)
-                for c, d in zip(cols, fila):
-                    with c:
-                        if d["preu"] is not None:
-                            etiqueta = d["botiga"] + (" ✏️" if d["es_manual"] else "")
-                            st.metric(
-                                etiqueta,
-                                f"{d['preu']:.2f} €",
-                                delta=f"{d['delta']:+.2f} €" if d["delta"] else None,
-                                delta_color="inverse",  # preu més baix = verd (bo)
-                            )
-                            if d["pct_ref"] is not None:
-                                color = "green" if d["pct_ref"] > 0 else "red"
-                                st.caption(f":{color}[{d['pct_ref']:+.1f}%] vs preu botiga")
-                            if d["es_manual"]:
-                                st.caption("✏️ Preu manual")
-                        else:
-                            st.metric(d["botiga"], "—")
+            if destacades:
+                st.markdown("**⭐ Destacades**")
+                mostrar_botigues(destacades, BOTIGUES_PER_FILA)
+                if resta:
+                    st.divider()
+            if resta:
+                mostrar_botigues(resta, BOTIGUES_PER_FILA)
 
             with st.expander("Veure dades en taula"):
                 registres = db.historic_per_producte(producte_id)
@@ -336,14 +382,17 @@ with tab_urls:
         st.subheader("URLs configurades")
         urls = db.llistar_urls(producte_id2)
         for u in urls:
-            c1, c2, c3, c4, c5 = st.columns([3, 1, 1, 1, 1])
+            es_destacada = bool(u["destacada"]) if "destacada" in u.keys() else False
+            estrella = "⭐" if es_destacada else "☆"
+            c1, c2, c3, c4, c5, c6 = st.columns([3, 1, 1, 1, 1, 1])
             ultim = db.ultim_preu(u["id"])
             if ultim and ultim["preu"] is not None:
                 marca_manual = " ✏️ (manual)" if ultim["es_manual"] else ""
                 preu_text = f"{ultim['preu']:.2f} €{marca_manual}"
             else:
                 preu_text = "—"
-            nom_botiga_mostrat = u["botiga"] + (" 🛑 (sense scraping)" if not u["selector_css"] else "")
+            prefix_dest = "⭐ " if es_destacada else ""
+            nom_botiga_mostrat = prefix_dest + u["botiga"] + (" 🛑 (sense scraping)" if not u["selector_css"] else "")
             c1.write(f"**{nom_botiga_mostrat}** — {u['url']}  \nÚltim preu: {preu_text}")
 
             if u["selector_css"]:
@@ -369,10 +418,14 @@ with tab_urls:
                 c2.write("")
                 c3.write("")
 
-            if c4.button("✏️ Preu manual", key=f"manual_{u['id']}"):
+            if c4.button(f"{estrella} Destacada", key=f"dest_{u['id']}"):
+                db.toggle_destacada(u["id"])
+                st.rerun()
+
+            if c5.button("✏️ Preu manual", key=f"manual_{u['id']}"):
                 st.session_state[f"manual_form_{u['id']}"] = True
 
-            if c5.button("🗑️", key=f"del_url_{u['id']}"):
+            if c6.button("🗑️", key=f"del_url_{u['id']}"):
                 db.eliminar_url(u["id"])
                 st.rerun()
 
@@ -380,15 +433,30 @@ with tab_urls:
             if st.session_state.get(f"manual_form_{u['id']}"):
                 with st.form(f"form_manual_{u['id']}"):
                     valor_inicial = float(ultim["preu"]) if ultim and ultim["preu"] is not None else 0.0
-                    preu_manual = st.number_input(
-                        f"Preu manual per «{u['botiga']}» (€)",
-                        min_value=0.0, step=0.01, format="%.2f", value=valor_inicial
-                    )
+                    col_preu, col_camp = st.columns([3, 1])
+                    with col_preu:
+                        preu_manual = st.number_input(
+                            f"Preu manual per «{u['botiga']}» (€)",
+                            min_value=0.0, step=0.01, format="%.2f", value=valor_inicial
+                        )
+                    with col_camp:
+                        st.write("")  # espaiat visual
+                        es_campanya = st.checkbox("🎯 Campanya", value=False)
                     desar = st.form_submit_button("✅ Desar preu manual")
                     if desar:
+                        from datetime import date
                         db.guardar_preu_manual(u["id"], preu_manual)
+                        if es_campanya:
+                            data_avui = date.today().strftime("%Y-%m-%d")
+                            try:
+                                escriure_nota_excel(u["botiga"], data_avui, "Campanya")
+                            except Exception:
+                                pass  # si l'Excel no existeix encara, no és crític
                         st.session_state[f"manual_form_{u['id']}"] = False
-                        st.success(f"Preu manual de {preu_manual:.2f} € desat per «{u['botiga']}» (marcat com a manual)")
+                        msg = f"Preu manual de {preu_manual:.2f} € desat per «{u['botiga']}»"
+                        if es_campanya:
+                            msg += " · 🎯 Nota 'Campanya' afegida a l'Excel"
+                        st.success(msg)
                         st.rerun()
 
             # Permet re-triar quin dels preus de la pàgina és el correcte,
@@ -433,12 +501,24 @@ with tab_export:
             )
 
     if os.path.exists(EXCEL_PATH):
-        with open(EXCEL_PATH, "rb") as f:
-            st.download_button(
-                "📥 Descarregar Excel",
-                f,
-                file_name=EXCEL_PATH,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+        col_obrir, col_baixar = st.columns([1, 1])
+        with col_obrir:
+            if st.button("📂 Obrir Excel", use_container_width=True):
+                import subprocess
+                try:
+                    ruta_absoluta = os.path.abspath(EXCEL_PATH)
+                    subprocess.Popen(["start", "", ruta_absoluta], shell=True)
+                    st.success("Obrint l'Excel...")
+                except Exception as e:
+                    st.error(f"No s'ha pogut obrir: {e}")
+        with col_baixar:
+            with open(EXCEL_PATH, "rb") as f:
+                st.download_button(
+                    "📥 Descarregar Excel",
+                    f,
+                    file_name=os.path.basename(EXCEL_PATH),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
     else:
         st.info("Encara no s'ha generat l'Excel. Prem 'Actualitzar Excel'.")
